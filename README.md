@@ -1,6 +1,6 @@
 # 🤖 Telegram AI Trading Bot
 
-A Telegram bot that analyses trading assets (gold / bitcoin) on demand. When you send
+A Telegram bot that analyses trading assets (gold / silver / bitcoin) on demand. When you send
 `/analyse XAUUSD`, the bot calls a local trading analysis API and replies with the full
 AI trade decision — recommendation, confidence, trade grade, entry plan, module breakdown,
 final score and the AI logic explanation.
@@ -56,16 +56,17 @@ Telegram Bot ──POST /api/v1/analyse──▶ Analysis API (FastAPI, port 800
 
 ## Start / restart script
 
-`./start.sh` stops any running bot instance (if present), then starts a fresh one in the
-background with logs written to `bot.log`:
+`./start.sh` stops any running bot instance (if present), then starts a fresh one **in the
+foreground** — it keeps running in the terminal until you press `Ctrl+C`, exactly like
+`python bot.py`:
 
 ```bash
 ./start.sh
 ```
 
 - 💡 Use it whenever you change `bot.py` or `.env` — it restarts with the new settings.
-- 📄 Live logs: `tail -f bot.log`
-- 🛑 Stop manually: `kill <PID>` (the script prints the PID, or find it with `pgrep -fl bot.py`)
+- 🛑 Stop the bot: press `Ctrl+C` in the same terminal.
+- 🔄 If it's already running elsewhere, the script stops the old instance first, then starts fresh.
 
 ## Usage
 
@@ -75,13 +76,15 @@ Open your bot in Telegram and send:
 | -------------------------------- | ------------------------------------------------ |
 | `/start`                         | Show the help message                            |
 | `/analyse XAUUSD` or `/analyse xusd` | Analyse gold (default timeframe: 15min)      |
+| `/analyse XAGUSD`                | Analyse silver                                   |
 | `/analyse BTCUSD`                | Analyse bitcoin                                  |
 | `/analyse XAUUSD 1h`             | Analyse gold on the 1-hour timeframe             |
 
 ### Supported assets & timeframes
 
-- **Assets:** `XAUUSD` / `XAU/USD` (gold), `BTCUSD` / `BTC/USD` (bitcoin)
-  — aliases like `xusd`, `XAU`, `GOLD`, `BTC`, `BITCOIN` also work.
+- **Assets:** `XAUUSD` / `XAU/USD` (gold), `XAGUSD` / `XAG/USD` (silver),
+  `BTCUSD` / `BTC/USD` (bitcoin)
+  — aliases like `xusd`, `XAU`, `GOLD`, `xag`, `SILVER`, `BTC`, `BITCOIN` also work.
 - **Timeframes:** `5min`, `15min`, `30min`, `1h`, `2h`, `4h`
 
 ## Example reply
@@ -116,7 +119,7 @@ The overall analysis shows ...
 ```
 .
 ├── bot.py              # Telegram bot entry point + /analyse handler
-├── start.sh            # Restart script — stops any running bot, starts it with logs
+├── start.sh            # Restart script — stops any running bot, runs bot.py in foreground
 ├── requirements.txt    # Python dependencies
 ├── .env.example        # Environment template (copy to .env)
 ├── .gitignore

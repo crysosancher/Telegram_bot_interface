@@ -22,8 +22,13 @@ ANALYSE_TIMEOUT = float(os.getenv("ANALYSE_TIMEOUT", "120"))
 
 ANALYSE_URL = f"{ANALYSE_BASE_URL.rstrip('/')}/{ANALYSE_ENDPOINT.lstrip('/')}"
 
+# Marker the score explainer uses for its heading. Newer API responses expose
+# the breakdown as a dedicated "score_breakdown" field; older ones embed it at
+# the end of ai_logic. Either way the bot sends it as its own second message.
+BREAKDOWN_MARKER = "📊 Score Breakdown — how each module was scored:"
+
 # ---------------------------------------------------------------- domain helpers
-VALID_ASSETS = {"XAUUSD", "XAU/USD", "BTCUSD", "BTC/USD"}
+VALID_ASSETS = {"XAUUSD", "XAU/USD", "XAGUSD", "XAG/USD", "BTCUSD", "BTC/USD"}
 VALID_TIMEFRAMES = {"5min", "15min", "30min", "1h", "2h", "4h"}
 
 ASSET_ALIASES = {
@@ -32,6 +37,10 @@ ASSET_ALIASES = {
     "XAU": "XAUUSD",
     "XUSD": "XAUUSD",
     "GOLD": "XAUUSD",
+    "XAGUSD": "XAGUSD",
+    "XAG/USD": "XAG/USD",
+    "XAG": "XAGUSD",
+    "SILVER": "XAGUSD",
     "BTCUSD": "BTCUSD",
     "BTC/USD": "BTC/USD",
     "BTC": "BTCUSD",
@@ -143,17 +152,40 @@ def format_analysis(data: dict) -> str:
             f"🔢 <b>Final Score:</b> {esc(final_score['total'])} / {esc(final_score.get('total_max', '?'))}"
         )
 
-    # ---- AI logic
+    # ---- AI logic (narrative only; the point-wise score breakdown is sent as
+    # its own second message via format_score_breakdown, so never truncate it).
     ai_logic = data.get("ai_logic", "")
     if ai_logic:
         lines.append("")
         lines.append("🧠 <b>AI Logic</b>")
+        # Older API responses may still embed the breakdown at the end of
+        # ai_logic — cut it so it isn't duplicated/truncated here.
+        ai_logic = ai_logic.split(BREAKDOWN_MARKER, 1)[0].rstrip()
         max_ai = 1400
         if len(ai_logic) > max_ai:
             ai_logic = ai_logic[:max_ai].rsplit(" ", 1)[0] + "…"
-        lines.append(esc(ai_logic))
+        if ai_logic:
+            lines.append(esc(ai_logic))
 
     return "\n".join(lines)
+
+
+def format_score_breakdown(data: dict) -> Optional[str]:
+    """Return the point-wise score breakdown, or None when there is none.
+
+    Newer API responses carry it in ``score_breakdown``; older responses embed
+    it inside ``ai_logic`` after BREAKDOWN_MARKER. Either way it is rendered as
+    a separate second Telegram message.
+    """
+    breakdown = (data.get("score_breakdown") or "").strip()
+    if not breakdown:
+        ai_logic = data.get("ai_logic") or ""
+        idx = ai_logic.find(BREAKDOWN_MARKER)
+        if idx != -1:
+            breakdown = ai_logic[idx:].strip()
+    if not breakdown:
+        return None
+    return esc(breakdown)
 
 
 def split_text(text: str, limit: int = 4000) -> list[str]:
@@ -180,6 +212,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "👋 <b>Welcome to the AI Trading Bot!</b>\n\n"
         "Analyse an asset with a single command:\n\n"
         "• <code>/analyse XAUUSD</code> — gold\n"
+        "• <code>/analyse XAGUSD</code> — silver\n"
         "• <code>/analyse BTCUSD</code> — bitcoin\n"
         "• <code>/analyse XAUUSD 1h</code> — optional timeframe "
         "(5min/15min/30min/1h/2h/4h)\n\n"
@@ -194,8 +227,8 @@ async def analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not args:
         await update.message.reply_text(
-            "Usage: <code>/analyse XAUUSD</code> or <code>/analyse BTCUSD 1h</code>\n\n"
-            "Supported assets: XAU/USD (gold), BTC/USD (bitcoin)\n"
+            "Usage: <code>/analyse XAUUSD</code> or <code>/analyse XAGUSD</code>\n\n"
+            "Supported assets: XAU/USD (gold), XAG/USD (silver), BTC/USD (bitcoin)\n"
             "Supported timeframes: 5min, 15min, 30min, 1h, 2h, 4h",
             parse_mode="HTML",
         )
@@ -205,7 +238,8 @@ async def analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not asset:
         await update.message.reply_text(
             f"❌ Unknown asset <code>{esc(args[0])}</code>.\n"
-            "Supported: <code>XAUUSD</code> (gold), <code>BTCUSD</code> (bitcoin).",
+            "Supported: <code>XAUUSD</code> (gold), <code>XAGUSD</code> (silver), "
+            "<code>BTCUSD</code> (bitcoin).",
             parse_mode="HTML",
         )
         return
@@ -243,6 +277,12 @@ async def analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     for chunk in chunks[1:]:
         await update.message.reply_text(chunk, parse_mode="HTML")
+
+    # Second message — full point-wise score breakdown (never truncated).
+    breakdown = format_score_breakdown(data)
+    if breakdown:
+        for chunk in split_text(breakdown):
+            await update.message.reply_text(chunk, parse_mode="HTML")
 
 
 # ---------------------------------------------------------------- entry point
