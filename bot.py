@@ -35,6 +35,15 @@ BOT_PASSWORD = os.getenv("BOT_PASSWORD", "")
 SESSION_TTL_HOURS = float(os.getenv("SESSION_TTL_HOURS", "24"))
 SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
 
+# Chats that bypass the password gate entirely (e.g. the professor group).
+# Comma-separated numeric Telegram chat IDs, e.g. "-1001234567890,-1009876543210".
+# Find a chat's ID by sending /chatid inside it.
+FREE_CHAT_IDS = {
+    int(x.strip())
+    for x in os.getenv("FREE_CHAT_IDS", "").split(",")
+    if x.strip()
+}
+
 ANALYSE_URL = f"{ANALYSE_BASE_URL.rstrip('/')}/{ANALYSE_ENDPOINT.lstrip('/')}"
 
 # Marker the score explainer uses for its heading. Newer API responses expose
@@ -62,8 +71,16 @@ def authorize(user_id: int) -> None:
     _sessions[user_id] = time.time() + SESSION_TTL_SECONDS
 
 
+def is_free_chat(chat_id: int) -> bool:
+    """True when the chat is whitelisted in FREE_CHAT_IDS and skips the gate."""
+    return chat_id in FREE_CHAT_IDS
+
+
 async def require_auth(update: Update) -> bool:
     """Reply with the password prompt when the sender is not authorized."""
+    chat = update.effective_chat
+    if chat is not None and is_free_chat(chat.id):
+        return True  # whitelisted chats (e.g. the professor group) skip the gate
     user = update.effective_user
     if user is not None and is_authorized(user.id):
         return True
@@ -401,6 +418,9 @@ async def analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle plain-text messages — treat them as password attempts."""
+    chat = update.effective_chat
+    if chat is not None and is_free_chat(chat.id):
+        return  # whitelisted chats skip the password gate entirely
     user = update.effective_user
     if user is None or update.message.text is None:
         return
@@ -427,6 +447,21 @@ async def password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+async def chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reply with this chat's numeric ID — handy for FREE_CHAT_IDS in .env."""
+    chat = update.effective_chat
+    if chat is None or update.message is None:
+        return
+    label = getattr(chat, "title", None) or chat.username or "this chat"
+    await update.message.reply_text(
+        f"💬 <b>{esc(label)}</b>\n"
+        f"Chat ID: <code>{chat.id}</code>\n\n"
+        "Add this ID to <code>FREE_CHAT_IDS</code> in <code>.env</code> to "
+        "make this chat password-free.",
+        parse_mode="HTML",
+    )
+
+
 # ---------------------------------------------------------------- entry point
 def main() -> None:
     if not BOT_TOKEN or BOT_TOKEN == "your_bot_token_here":
@@ -451,6 +486,7 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("analyse", analyse))
+    app.add_handler(CommandHandler("chatid", chatid))
     if BOT_PASSWORD:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, password))
 

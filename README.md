@@ -49,6 +49,7 @@ Telegram Bot ──POST /api/v1/analyse──▶ Analysis API (FastAPI, port 800
    | `ANALYSE_TIMEOUT`    | Request timeout in seconds               | `120`                  |
    | `BOT_PASSWORD`       | Password that unlocks the bot (see below)| *(empty = open)*       |
    | `SESSION_TTL_HOURS`  | How long an unlock lasts, in hours       | `24`                   |
+   | `FREE_CHAT_IDS`      | Comma-separated chat IDs that skip the password | *(empty = none)* |
 
 4. **Run the bot** (or just `./start.sh` — see below):
 
@@ -83,6 +84,20 @@ If you set a `BOT_PASSWORD` in `.env`, the bot becomes private:
 - Wrong passwords are rejected with an error message.
 - Sessions are kept **in memory** — restarting the bot clears all unlocks.
 - Leave `BOT_PASSWORD` empty to disable the password and keep the bot open to everyone.
+
+### Free group (no password needed)
+
+To let one chat — e.g. the professor group — use the bot without a password, list
+its numeric chat ID in `FREE_CHAT_IDS` (comma-separated for several chats):
+
+```bash
+FREE_CHAT_IDS=-1001234567890
+```
+
+Find a chat's ID by sending `/chatid` inside that chat — the bot replies with the
+numeric ID (groups look like `-100xxxxxxxxxx`). Whitelisted chats skip the password
+prompt entirely; every other chat still requires it. `FREE_CHAT_IDS` also works in
+a private chat (use that user's numeric ID).
 
 ## Usage
 
