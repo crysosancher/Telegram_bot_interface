@@ -47,6 +47,8 @@ Telegram Bot ──POST /api/v1/analyse──▶ Analysis API (FastAPI, port 800
    | `ANALYSE_BASE_URL`   | Analysis API base URL                    | `http://127.0.0.1:8001`|
    | `ANALYSE_ENDPOINT`   | API path for the analyse endpoint        | `/api/v1/analyse`      |
    | `ANALYSE_TIMEOUT`    | Request timeout in seconds               | `120`                  |
+   | `BOT_PASSWORD`       | Password that unlocks the bot (see below)| *(empty = open)*       |
+   | `SESSION_TTL_HOURS`  | How long an unlock lasts, in hours       | `24`                   |
 
 4. **Run the bot** (or just `./start.sh` — see below):
 
@@ -68,13 +70,27 @@ foreground** — it keeps running in the terminal until you press `Ctrl+C`, exac
 - 🛑 Stop the bot: press `Ctrl+C` in the same terminal.
 - 🔄 If it's already running elsewhere, the script stops the old instance first, then starts fresh.
 
+## Password access (optional)
+
+If you set a `BOT_PASSWORD` in `.env`, the bot becomes private:
+
+1. The **first time** someone messages it (or once their session expires), the bot
+   replies asking for the password.
+2. They send the password as a normal message.
+3. A correct password unlocks the bot for `SESSION_TTL_HOURS` hours (default **24
+   hours / one day**). After that they must send the password again.
+
+- Wrong passwords are rejected with an error message.
+- Sessions are kept **in memory** — restarting the bot clears all unlocks.
+- Leave `BOT_PASSWORD` empty to disable the password and keep the bot open to everyone.
+
 ## Usage
 
 Open your bot in Telegram and send:
 
 | Command                          | Description                                      |
 | -------------------------------- | ------------------------------------------------ |
-| `/start`                         | Show the help message                            |
+| `/start`                         | Show the help message (password prompt first, if enabled) |
 | `/analyse XAUUSD` or `/analyse xusd` | Analyse gold (default timeframe: 15min)      |
 | `/analyse XAGUSD`                | Analyse silver                                   |
 | `/analyse BTCUSD`                | Analyse bitcoin                                  |
@@ -95,6 +111,9 @@ Open your bot in Telegram and send:
 🟢 Recommendation: BUY
 📈 Confidence: 68.5%
 🏅 Trade Grade: B+
+💲 Live Price: 4375.69 (as of 2026-09-04 22:45:00 UTC)
+🕐 Session: New York Session
+    13:00-20:45 UTC · 18:30-02:15 IST
 
 💰 Entry Plan
 • Entry: 4375.69
@@ -108,10 +127,13 @@ Open your bot in Telegram and send:
 • trend: Trend Partial (9/15)
 • ...
 
-🔢 Final Score: 36 / 115
+🔢 Final Score: 68 / 100
 
 🧠 AI Logic
 The overall analysis shows ...
+
+📊 Score Breakdown is posted as a separate second message so it never gets truncated.
+
 ```
 
 ## Project structure

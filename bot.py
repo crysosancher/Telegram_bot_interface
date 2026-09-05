@@ -5,12 +5,20 @@ import html
 import os
 import re
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 load_dotenv()
 
@@ -20,12 +28,52 @@ ANALYSE_BASE_URL = os.getenv("ANALYSE_BASE_URL", "http://127.0.0.1:8001")
 ANALYSE_ENDPOINT = os.getenv("ANALYSE_ENDPOINT", "/api/v1/analyse")
 ANALYSE_TIMEOUT = float(os.getenv("ANALYSE_TIMEOUT", "120"))
 
+# Shared password gate. When BOT_PASSWORD is empty the bot stays open to
+# everyone; when set, every message is gated behind it.
+BOT_PASSWORD = os.getenv("BOT_PASSWORD", "")
+# How long an unlock lasts, in hours (1 day by default).
+SESSION_TTL_HOURS = float(os.getenv("SESSION_TTL_HOURS", "24"))
+SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
+
 ANALYSE_URL = f"{ANALYSE_BASE_URL.rstrip('/')}/{ANALYSE_ENDPOINT.lstrip('/')}"
 
 # Marker the score explainer uses for its heading. Newer API responses expose
 # the breakdown as a dedicated "score_breakdown" field; older ones embed it at
 # the end of ai_logic. Either way the bot sends it as its own second message.
 BREAKDOWN_MARKER = "📊 Score Breakdown — how each module was scored:"
+
+# ---------------------------------------------------------------- auth / sessions
+# Simple shared-password gate. Once a user sends the right password they get an
+# in-memory session lasting SESSION_TTL_HOURS hours (default 24). Sessions are
+# held in memory, so a bot restart clears them and everyone must log in again.
+_sessions: dict[int, float] = {}  # user_id -> authorized-until (epoch seconds)
+
+
+def is_authorized(user_id: int) -> bool:
+    """True when the user has a live session (no password configured → open)."""
+    if not BOT_PASSWORD:
+        return True
+    until = _sessions.get(user_id)
+    return until is not None and until > time.time()
+
+
+def authorize(user_id: int) -> None:
+    """Grant the user a fresh session of SESSION_TTL_HOURS hours."""
+    _sessions[user_id] = time.time() + SESSION_TTL_SECONDS
+
+
+async def require_auth(update: Update) -> bool:
+    """Reply with the password prompt when the sender is not authorized."""
+    user = update.effective_user
+    if user is not None and is_authorized(user.id):
+        return True
+    await update.message.reply_text(
+        "🔒 <b>Password required</b>\n\n"
+        "This bot is private. Send the password to unlock it — "
+        f"you'll stay unlocked for {SESSION_TTL_HOURS:g} hours.",
+        parse_mode="HTML",
+    )
+    return False
 
 # ---------------------------------------------------------------- domain helpers
 VALID_ASSETS = {"XAUUSD", "XAU/USD", "XAGUSD", "XAG/USD", "BTCUSD", "BTC/USD"}
@@ -64,6 +112,35 @@ def normalize_asset(raw: str) -> Optional[str]:
 def esc(value) -> str:
     """Escape arbitrary API strings for Telegram HTML."""
     return html.escape(str(value), quote=False)
+
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _parse_utc(ts):
+    """Parse an ISO UTC timestamp (with or without tz) into an aware UTC datetime."""
+    if not ts:
+        return None
+    s = str(ts).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _fmt_ts(ts) -> str:
+    """Format an ISO UTC timestamp as UTC 'YYYY-MM-DD HH:MM:SS'."""
+    dt = _parse_utc(ts)
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+
+
+def _fmt_ts_ist(ts) -> str:
+    """Format an ISO UTC timestamp as IST (UTC+5:30) 'YYYY-MM-DD HH:MM:SS'."""
+    dt = _parse_utc(ts)
+    return dt.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S") if dt else ""
 
 
 async def call_analysis_api(asset: str, timeframe: Optional[str]) -> dict:
@@ -106,6 +183,31 @@ def format_analysis(data: dict) -> str:
     lines.append(f"{rec_emoji} <b>Recommendation:</b> {esc(recommendation)}")
     lines.append(f"📈 <b>Confidence:</b> {confidence}%")
     lines.append(f"🏅 <b>Trade Grade:</b> {grade}")
+
+    # ---- price / data freshness (price = latest candle close; shown in IST)
+    price = data.get("price")
+    if price is not None:
+        ts = _fmt_ts(data.get("last_candle_ts"))
+        ts_ist = _fmt_ts_ist(data.get("last_candle_ts"))
+        tf = data.get("timeframe") or ""
+        candle = f"{esc(tf)} candle" if tf else "candle"
+        if ts and ts_ist:
+            tail = f" @ {esc(ts_ist)} IST · {esc(ts)} UTC"
+        elif ts:
+            tail = f" @ {esc(ts)} UTC"
+        else:
+            tail = ""
+        lines.append(f"💲 <b>Price:</b> {esc(price)} <i>(latest {candle}{tail})</i>")
+
+    # ---- current trading session (so the user can verify the schedule)
+    ms = data.get("market_status") or {}
+    session = ms.get("session", "")
+    if session:
+        window = f"{ms.get('session_utc', '')} · {ms.get('session_ist', '')}"
+        line = f"🕐 <b>Session:</b> {esc(session)}"
+        if window.strip(" ·"):
+            line += f"\n     <i>{esc(window)}</i>"
+        lines.append(line)
 
     # ---- entry plan
     entry = data.get("entry") or {}
@@ -151,6 +253,14 @@ def format_analysis(data: dict) -> str:
         lines.append(
             f"🔢 <b>Final Score:</b> {esc(final_score['total'])} / {esc(final_score.get('total_max', '?'))}"
         )
+
+    # ---- data-provider warnings (API failures / missing data)
+    data_warnings = data.get("data_warnings") or []
+    if data_warnings:
+        lines.append("")
+        lines.append("⚠️ <b>Data Warnings</b>")
+        for warn in data_warnings[:8]:
+            lines.append(f"• {esc(warn)}")
 
     # ---- AI logic (narrative only; the point-wise score breakdown is sent as
     # its own second message via format_score_breakdown, so never truncate it).
@@ -208,6 +318,8 @@ def split_text(text: str, limit: int = 4000) -> list[str]:
 
 # ---------------------------------------------------------------- bot handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_auth(update):
+        return
     await update.message.reply_text(
         "👋 <b>Welcome to the AI Trading Bot!</b>\n\n"
         "Analyse an asset with a single command:\n\n"
@@ -223,6 +335,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_auth(update):
+        return
     args = context.args or []
 
     if not args:
@@ -285,6 +399,34 @@ async def analyse(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(chunk, parse_mode="HTML")
 
 
+async def password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle plain-text messages — treat them as password attempts."""
+    user = update.effective_user
+    if user is None or update.message.text is None:
+        return
+
+    if is_authorized(user.id):
+        await update.message.reply_text(
+            "✅ You're already unlocked for this session.",
+            parse_mode="HTML",
+        )
+        return
+
+    if update.message.text.strip() == BOT_PASSWORD:
+        authorize(user.id)
+        await update.message.reply_text(
+            "✅ <b>Unlocked!</b> You have access for "
+            f"{SESSION_TTL_HOURS:g} hours.\n\n"
+            "Try <code>/analyse XAUUSD</code> to get started.",
+            parse_mode="HTML",
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Wrong password. Try again.",
+            parse_mode="HTML",
+        )
+
+
 # ---------------------------------------------------------------- entry point
 def main() -> None:
     if not BOT_TOKEN or BOT_TOKEN == "your_bot_token_here":
@@ -295,6 +437,13 @@ def main() -> None:
         )
         sys.exit(1)
 
+    if not BOT_PASSWORD:
+        print(
+            "⚠️  BOT_PASSWORD is not set — the bot is open to everyone.\n"
+            "   Add a BOT_PASSWORD to .env to password-protect it.",
+            file=sys.stderr,
+        )
+
     # Python 3.14 removed the implicit event-loop creation in
     # asyncio.get_event_loop(); set one explicitly for run_polling().
     asyncio.set_event_loop(asyncio.new_event_loop())
@@ -302,6 +451,8 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("analyse", analyse))
+    if BOT_PASSWORD:
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, password))
 
     print(f"🤖 Bot started. API endpoint: {ANALYSE_URL}")
     app.run_polling()
